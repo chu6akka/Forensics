@@ -6,9 +6,11 @@ from tkinter import messagebox, ttk, filedialog
 
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import numpy as np
 from openpyxl import Workbook
 from pymorphy3 import MorphAnalyzer
 import stanza
+import torch
 
 WORD_RE = re.compile(r"[А-Яа-яЁё]+(?:-[А-Яа-яЁё]+)*")
 UD_POS_RU = {
@@ -147,6 +149,7 @@ class LemmaAnalyzerApp:
 
     def _init_stanza(self) -> stanza.Pipeline | None:
         try:
+            torch.serialization.add_safe_globals([np.core.multiarray._reconstruct])
             stanza.download("ru", verbose=False)
             return stanza.Pipeline(
                 "ru",
