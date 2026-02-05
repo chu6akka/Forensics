@@ -8,8 +8,46 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from openpyxl import Workbook
 from pymorphy3 import MorphAnalyzer
+import stanza
 
 WORD_RE = re.compile(r"[А-Яа-яЁё]+(?:-[А-Яа-яЁё]+)*")
+UD_POS_RU = {
+    "ADJ": "Прилагательное",
+    "ADP": "Предлог",
+    "ADV": "Наречие",
+    "AUX": "Вспомогательный глагол",
+    "CCONJ": "Сочинительный союз",
+    "DET": "Определитель",
+    "INTJ": "Междометие",
+    "NOUN": "Существительное",
+    "NUM": "Числительное",
+    "PART": "Частица",
+    "PRON": "Местоимение",
+    "PROPN": "Имя собственное",
+    "SCONJ": "Подчинительный союз",
+    "SYM": "Символ",
+    "VERB": "Глагол",
+    "X": "Другое",
+}
+PYMORPHY_POS_RU = {
+    "NOUN": "Существительное",
+    "ADJF": "Прилагательное",
+    "ADJS": "Краткое прилагательное",
+    "COMP": "Сравнительная степень",
+    "VERB": "Глагол",
+    "INFN": "Инфинитив",
+    "PRTF": "Причастие",
+    "PRTS": "Краткое причастие",
+    "GRND": "Деепричастие",
+    "NUMR": "Числительное",
+    "ADVB": "Наречие",
+    "NPRO": "Местоимение",
+    "PRED": "Предикатив",
+    "PREP": "Предлог",
+    "CONJ": "Союз",
+    "PRCL": "Частица",
+    "INTJ": "Междометие",
+}
 
 
 @dataclass
@@ -24,6 +62,7 @@ class LemmaAnalyzerApp:
         self.root = root
         self.root.title("Анализ словоформ")
         self.morph = MorphAnalyzer()
+        self.nlp = self._init_stanza()
         self.entries: list[LemmaEntry] = []
         self.pos_counts: dict[str, int] = {}
         self.total_words: int = 0
@@ -81,6 +120,47 @@ class LemmaAnalyzerApp:
         self.tree.configure(yscrollcommand=scrollbar.set)
         scrollbar.grid(row=3, column=1, sticky="ns", pady=(10, 0))
 
+        summary_frame = ttk.LabelFrame(main_frame, text="Сводка по частям речи")
+        summary_frame.grid(row=4, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
+        summary_frame.columnconfigure(0, weight=1)
+
+        self.total_words_label = ttk.Label(summary_frame, text="Всего слов: 0")
+        self.total_words_label.grid(row=0, column=0, sticky="w", padx=5, pady=(5, 2))
+
+        self.pos_tree = ttk.Treeview(
+            summary_frame,
+            columns=("pos", "count", "coef"),
+            show="headings",
+            height=6,
+        )
+        self.pos_tree.heading("pos", text="Часть речи")
+        self.pos_tree.heading("count", text="Количество")
+        self.pos_tree.heading("coef", text="Коэффициент")
+        self.pos_tree.column("pos", width=200, anchor="w")
+        self.pos_tree.column("count", width=120, anchor="center")
+        self.pos_tree.column("coef", width=120, anchor="center")
+        self.pos_tree.grid(row=1, column=0, sticky="nsew", padx=5, pady=(0, 5))
+
+        pos_scrollbar = ttk.Scrollbar(summary_frame, orient="vertical", command=self.pos_tree.yview)
+        self.pos_tree.configure(yscrollcommand=pos_scrollbar.set)
+        pos_scrollbar.grid(row=1, column=1, sticky="ns", pady=(0, 5))
+
+    def _init_stanza(self) -> stanza.Pipeline | None:
+        try:
+            stanza.download("ru", verbose=False)
+            return stanza.Pipeline(
+                "ru",
+                processors="tokenize,pos,lemma",
+                use_gpu=False,
+                tokenize_no_ssplit=True,
+                verbose=False,
+            )
+        except Exception as exc:  # pragma: no cover - UI fallback
+            messagebox.showwarning(
+                "Контекстный анализ недоступен",
+                f"Не удалось загрузить модель Stanza. Будет использован базовый анализ.\n{exc}",
+            )
+            return None
     def _add_text_context_menu(self, widget: tk.Text) -> None:
         menu = tk.Menu(widget, tearoff=0)
         menu.add_command(label="Вырезать", command=lambda: widget.event_generate("<<Cut>>"))
@@ -109,18 +189,34 @@ class LemmaAnalyzerApp:
         pos_counts: defaultdict[str, int] = defaultdict(int)
         total_words = 0
 
-        for match in WORD_RE.finditer(text):
-            token = match.group(0)
-            parse = self.morph.parse(token)[0]
-            lemma = parse.normal_form
-            pos = parse.tag.POS or "Неизвестно"
-            form_key = token.lower()
+        if self.nlp:
+            doc = self.nlp(text)
+            for sentence in doc.sentences:
+                for word in sentence.words:
+                    if not WORD_RE.fullmatch(word.text or ""):
+                        continue
+                    lemma = (word.lemma or word.text).lower()
+                    pos_label = UD_POS_RU.get(word.upos or "", "Неизвестно")
+                    form_key = word.text.lower()
 
-            lemma_counts[lemma] += 1
-            if form_key not in lemma_forms[lemma]:
-                lemma_forms[lemma][form_key] = pos
-            pos_counts[pos] += 1
-            total_words += 1
+                    lemma_counts[lemma] += 1
+                    if form_key not in lemma_forms[lemma]:
+                        lemma_forms[lemma][form_key] = pos_label
+                    pos_counts[pos_label] += 1
+                    total_words += 1
+        else:
+            for match in WORD_RE.finditer(text):
+                token = match.group(0)
+                parse = self.morph.parse(token)[0]
+                lemma = parse.normal_form
+                pos_label = PYMORPHY_POS_RU.get(parse.tag.POS, "Неизвестно")
+                form_key = token.lower()
+
+                lemma_counts[lemma] += 1
+                if form_key not in lemma_forms[lemma]:
+                    lemma_forms[lemma][form_key] = pos_label
+                pos_counts[pos_label] += 1
+                total_words += 1
 
         for lemma, count in sorted(lemma_counts.items()):
             forms = lemma_forms[lemma]
@@ -130,6 +226,7 @@ class LemmaAnalyzerApp:
         self.pos_counts = dict(pos_counts)
         self.total_words = total_words
         self._populate_table()
+        self._populate_pos_summary()
 
     def show_pos_coefficients(self) -> None:
         if not self.pos_counts or self.total_words == 0:
@@ -146,21 +243,46 @@ class LemmaAnalyzerApp:
         window = tk.Toplevel(self.root)
         window.title("Частотные коэффициенты частей речи")
 
-        figure, ax = plt.subplots(figsize=(8, 4))
+        figure, ax = plt.subplots(figsize=(7, 5))
         labels = list(coefficients.keys())
         values = [coefficients[label] for label in labels]
 
-        ax.bar(labels, values, color="#4c78a8")
-        ax.set_ylabel("Коэффициент")
-        ax.set_xlabel("Часть речи")
+        if not values:
+            messagebox.showinfo("Нет данных", "Недостаточно данных для диаграммы.")
+            return
+
+        colors = plt.cm.tab20.colors
+        ax.pie(
+            values,
+            labels=labels,
+            autopct="%1.1f%%",
+            startangle=90,
+            colors=colors[: len(values)],
+            textprops={"fontsize": 9},
+        )
         ax.set_title("Частотные коэффициенты частей речи")
-        ax.set_ylim(0, max(values) * 1.2 if values else 1)
-        ax.tick_params(axis="x", rotation=45)
+        ax.axis("equal")
         figure.tight_layout()
 
         canvas = FigureCanvasTkAgg(figure, master=window)
         canvas.draw()
         canvas.get_tk_widget().pack(fill="both", expand=True)
+
+    def _populate_pos_summary(self) -> None:
+        for item in self.pos_tree.get_children():
+            self.pos_tree.delete(item)
+
+        self.total_words_label.config(text=f"Всего слов: {self.total_words}")
+        if self.total_words == 0:
+            return
+
+        for pos_label, count in sorted(self.pos_counts.items()):
+            coefficient = count / self.total_words
+            self.pos_tree.insert(
+                "",
+                "end",
+                values=(pos_label, count, f"{coefficient:.4f}"),
+            )
 
     def _populate_table(self) -> None:
         for item in self.tree.get_children():
