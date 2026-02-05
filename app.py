@@ -6,11 +6,9 @@ from tkinter import messagebox, ttk, filedialog
 
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-import numpy as np
+from natasha import Doc, MorphVocab, NewsEmbedding, NewsMorphTagger, Segmenter
 from openpyxl import Workbook
 from pymorphy3 import MorphAnalyzer
-import stanza
-import torch
 
 WORD_RE = re.compile(r"[А-Яа-яЁё]+(?:-[А-Яа-яЁё]+)*")
 UD_POS_RU = {
@@ -64,7 +62,7 @@ class LemmaAnalyzerApp:
         self.root = root
         self.root.title("Анализ словоформ")
         self.morph = MorphAnalyzer()
-        self.nlp = self._init_stanza()
+        self.nlp = self._init_natasha()
         self.entries: list[LemmaEntry] = []
         self.pos_counts: dict[str, int] = {}
         self.total_words: int = 0
@@ -147,37 +145,17 @@ class LemmaAnalyzerApp:
         self.pos_tree.configure(yscrollcommand=pos_scrollbar.set)
         pos_scrollbar.grid(row=1, column=1, sticky="ns", pady=(0, 5))
 
-    def _init_stanza(self) -> stanza.Pipeline | None:
+    def _init_natasha(self) -> tuple[Segmenter, NewsMorphTagger, MorphVocab] | None:
         try:
-            safe_globals = [
-                np.core.multiarray._reconstruct,
-                np.core.multiarray.scalar,
-                np.dtype,
-                np.ndarray,
-            ]
-            if hasattr(torch.serialization, "add_safe_globals"):
-                torch.serialization.add_safe_globals(safe_globals)
-            stanza.download("ru", verbose=False)
-            if hasattr(torch.serialization, "safe_globals"):
-                with torch.serialization.safe_globals(safe_globals):
-                    return stanza.Pipeline(
-                        "ru",
-                        processors="tokenize,pos,lemma",
-                        use_gpu=False,
-                        tokenize_no_ssplit=True,
-                        verbose=False,
-                    )
-            return stanza.Pipeline(
-                "ru",
-                processors="tokenize,pos,lemma",
-                use_gpu=False,
-                tokenize_no_ssplit=True,
-                verbose=False,
-            )
+            segmenter = Segmenter()
+            embedding = NewsEmbedding()
+            morph_tagger = NewsMorphTagger(embedding)
+            morph_vocab = MorphVocab()
+            return segmenter, morph_tagger, morph_vocab
         except Exception as exc:  # pragma: no cover - UI fallback
             messagebox.showwarning(
                 "Контекстный анализ недоступен",
-                f"Не удалось загрузить модель Stanza. Будет использован базовый анализ.\n{exc}",
+                f"Не удалось загрузить модель Natasha. Будет использован базовый анализ.\n{exc}",
             )
             return None
     def _add_text_context_menu(self, widget: tk.Text) -> None:
@@ -209,20 +187,23 @@ class LemmaAnalyzerApp:
         total_words = 0
 
         if self.nlp:
-            doc = self.nlp(text)
-            for sentence in doc.sentences:
-                for word in sentence.words:
-                    if not WORD_RE.fullmatch(word.text or ""):
-                        continue
-                    lemma = (word.lemma or word.text).lower()
-                    pos_label = UD_POS_RU.get(word.upos or "", "Неизвестно")
-                    form_key = word.text.lower()
+            segmenter, morph_tagger, morph_vocab = self.nlp
+            doc = Doc(text)
+            doc.segment(segmenter)
+            doc.tag_morph(morph_tagger)
+            for token in doc.tokens:
+                if not WORD_RE.fullmatch(token.text or ""):
+                    continue
+                token.lemmatize(morph_vocab)
+                lemma = (token.lemma or token.text).lower()
+                pos_label = UD_POS_RU.get(token.pos or "", "Неизвестно")
+                form_key = token.text.lower()
 
-                    lemma_counts[lemma] += 1
-                    if form_key not in lemma_forms[lemma]:
-                        lemma_forms[lemma][form_key] = pos_label
-                    pos_counts[pos_label] += 1
-                    total_words += 1
+                lemma_counts[lemma] += 1
+                if form_key not in lemma_forms[lemma]:
+                    lemma_forms[lemma][form_key] = pos_label
+                pos_counts[pos_label] += 1
+                total_words += 1
         else:
             for match in WORD_RE.finditer(text):
                 token = match.group(0)
