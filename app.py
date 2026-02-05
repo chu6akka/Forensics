@@ -4,6 +4,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 from tkinter import messagebox, ttk, filedialog
 
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from openpyxl import Workbook
 from pymorphy3 import MorphAnalyzer
 
@@ -23,6 +25,8 @@ class LemmaAnalyzerApp:
         self.root.title("Анализ словоформ")
         self.morph = MorphAnalyzer()
         self.entries: list[LemmaEntry] = []
+        self.pos_counts: dict[str, int] = {}
+        self.total_words: int = 0
 
         self._build_ui()
 
@@ -41,6 +45,7 @@ class LemmaAnalyzerApp:
 
         self.text_input = tk.Text(main_frame, height=8, wrap="word")
         self.text_input.grid(row=1, column=0, sticky="nsew", pady=(5, 10))
+        self._add_text_context_menu(self.text_input)
 
         buttons_frame = ttk.Frame(main_frame)
         buttons_frame.grid(row=2, column=0, sticky="ew")
@@ -52,6 +57,11 @@ class LemmaAnalyzerApp:
         ttk.Button(buttons_frame, text="Экспорт в Excel", command=self.export_excel).grid(
             row=0, column=1, sticky="w", padx=10
         )
+        ttk.Button(
+            buttons_frame,
+            text="Показать коэффициенты",
+            command=self.show_pos_coefficients,
+        ).grid(row=0, column=2, sticky="w", padx=10)
 
         self.tree = ttk.Treeview(
             main_frame,
@@ -71,6 +81,22 @@ class LemmaAnalyzerApp:
         self.tree.configure(yscrollcommand=scrollbar.set)
         scrollbar.grid(row=3, column=1, sticky="ns", pady=(10, 0))
 
+    def _add_text_context_menu(self, widget: tk.Text) -> None:
+        menu = tk.Menu(widget, tearoff=0)
+        menu.add_command(label="Вырезать", command=lambda: widget.event_generate("<<Cut>>"))
+        menu.add_command(label="Копировать", command=lambda: widget.event_generate("<<Copy>>"))
+        menu.add_command(label="Вставить", command=lambda: widget.event_generate("<<Paste>>"))
+        menu.add_separator()
+        menu.add_command(label="Выделить всё", command=lambda: widget.event_generate("<<SelectAll>>"))
+
+        def show_menu(event: tk.Event) -> None:
+            menu.tk_popup(event.x_root, event.y_root)
+
+        widget.bind("<Button-3>", show_menu)
+        widget.bind("<Control-v>", lambda event: widget.event_generate("<<Paste>>"))
+        widget.bind("<Control-V>", lambda event: widget.event_generate("<<Paste>>"))
+        widget.bind("<Control-Shift-V>", lambda event: widget.event_generate("<<Paste>>"))
+
     def analyze(self) -> None:
         text = self.text_input.get("1.0", tk.END).strip()
         if not text:
@@ -80,6 +106,8 @@ class LemmaAnalyzerApp:
         lemma_data: dict[str, LemmaEntry] = {}
         lemma_counts: defaultdict[str, int] = defaultdict(int)
         lemma_forms: defaultdict[str, dict[str, str]] = defaultdict(dict)
+        pos_counts: defaultdict[str, int] = defaultdict(int)
+        total_words = 0
 
         for match in WORD_RE.finditer(text):
             token = match.group(0)
@@ -91,13 +119,48 @@ class LemmaAnalyzerApp:
             lemma_counts[lemma] += 1
             if form_key not in lemma_forms[lemma]:
                 lemma_forms[lemma][form_key] = pos
+            pos_counts[pos] += 1
+            total_words += 1
 
         for lemma, count in sorted(lemma_counts.items()):
             forms = lemma_forms[lemma]
             lemma_data[lemma] = LemmaEntry(lemma=lemma, count=count, forms=forms)
 
         self.entries = list(lemma_data.values())
+        self.pos_counts = dict(pos_counts)
+        self.total_words = total_words
         self._populate_table()
+
+    def show_pos_coefficients(self) -> None:
+        if not self.pos_counts or self.total_words == 0:
+            messagebox.showinfo(
+                "Нет данных",
+                "Сначала выполните анализ, чтобы рассчитать коэффициенты.",
+            )
+            return
+
+        coefficients = {
+            pos: count / self.total_words for pos, count in self.pos_counts.items()
+        }
+
+        window = tk.Toplevel(self.root)
+        window.title("Частотные коэффициенты частей речи")
+
+        figure, ax = plt.subplots(figsize=(8, 4))
+        labels = list(coefficients.keys())
+        values = [coefficients[label] for label in labels]
+
+        ax.bar(labels, values, color="#4c78a8")
+        ax.set_ylabel("Коэффициент")
+        ax.set_xlabel("Часть речи")
+        ax.set_title("Частотные коэффициенты частей речи")
+        ax.set_ylim(0, max(values) * 1.2 if values else 1)
+        ax.tick_params(axis="x", rotation=45)
+        figure.tight_layout()
+
+        canvas = FigureCanvasTkAgg(figure, master=window)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill="both", expand=True)
 
     def _populate_table(self) -> None:
         for item in self.tree.get_children():
